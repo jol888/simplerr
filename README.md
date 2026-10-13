@@ -1,0 +1,117 @@
+# simplerr
+
+用手机的加速度计和陀螺仪测呼吸率（RR）。平躺，把手机放在胸口或腹部即可，主要面向**慢呼吸**（每分钟 3–15 次左右）练习场景。Android / Flutter。
+
+> 这不是医疗器械，结果仅供参考。
+
+## 功能
+
+- 实时呼吸率：最近 15 秒有效估计的中位数，开始后约 30 秒出第一个读数
+- 累计呼吸次数，并显示因移动等原因无法计数的时长
+- 滤波后的呼吸波形，标出每次吸气起点
+- 呼吸率趋势图，可点击 / 拖动游标查看任意时刻的单窗口值、平滑值、信号质量、SNR、所用传感器，以及该时刻对应的波形
+- 移动检测：放手机、翻身、拿起手机的时段自动剔除
+- 原始数据录制与导出（CSV + JSON），用于离线迭代算法
+
+## 安装
+
+从 [Releases](https://github.com/jol888/simplerr/releases) 下载 APK：
+
+- `simplerr-*-arm64-v8a.apk`：绝大多数 2017 年以后的手机
+- `simplerr-*-universal.apk`：不确定架构时用这个
+
+APK 用调试密钥签名，安装时需要允许"安装未知来源应用"。
+
+## 使用
+
+1. 平躺，手机屏幕朝上放在胸口或腹部，点 **开始**，保持静止。
+2. 约 30 秒后出现读数；窗口逐渐增长到 60 秒，读数随之更稳。
+3. 点 **停止** 后可以填写自己数的呼吸次数、姿势和备注，作为评估算法的参考值。
+   建议等手机放稳（"未计"时长不再增加）后再开始数，拿起手机前停止数。
+4. 右上角文件夹图标进入录制列表，可分享导出单条或全部录制。
+
+录制期间屏幕保持常亮；熄屏后系统可能停止传感器。
+
+## 算法概要
+
+当前版本见 `RespirationEstimator.version`（`lib/algo/estimator.dart`）。
+
+1. 加速度计、陀螺仪分别重采样到 10 Hz，去线性趋势，零相位带通 0.04–0.8 Hz（2.4–48 次/分）
+2. 每个传感器三轴做 PCA，取第一主成分
+3. 对 60 秒窗口做功率谱，取峰值频率；若半频处有足够强的局部峰，改取半频（慢而不对称的呼吸，二次谐波常常比基频强）
+4. 选频谱峰最集中的传感器；用质量（峰附近能量占比）、SNR（相对 1.5–4.5 Hz 噪声底）和移动检测判定是否有效
+5. 计数：在估计频率附近再滤波，按局部 RMS 自适应阈值做滞回过零计数
+6. 平滑（`lib/algo/tracker.dart`）：最近 15 秒有效估计取中位数
+7. 累计（`lib/algo/breath_counter.dart`）：逐窗口合并吸气起点并去重
+
+窗口内有移动时，窗口起点挪到最后一次移动结束后 2 秒（至少保留 30 秒）。
+
+## 当前准确度
+
+作者本人仰卧、手机放胸口的 3 条带人工计数的录制（2–3 分钟，每分钟 6.6–9.6 次）：
+
+| 指标 | 误差 |
+|---|---|
+| 平滑呼吸率中位数 vs 人工计数折算 | 平均 0.34 次/分 |
+| 静止段计数 vs 人工计数折算 | 平均少 1.3 次 |
+
+合成信号（`test/estimator_test.dart`）：正弦形慢呼吸低至每分钟 3 次可测；二次谐波主导的不对称呼吸低至每分钟 4 次可测，更低会被误报为 2 倍。
+
+样本很少，以上数字只说明方向。
+
+## 开发
+
+需要 Flutter（自带 Dart）和 Android SDK。
+
+```sh
+flutter test                 # 算法单元测试（合成信号）
+flutter run --release        # 装到已连接的手机
+flutter build apk --release
+```
+
+### 代码结构
+
+- `lib/algo/`：纯 Dart，不依赖 Flutter，手机端与离线工具共用同一份代码
+  - `estimator.dart`：单窗口估计（`EstimatorConfig` 里是全部参数）
+  - `tracker.dart`：平滑
+  - `breath_counter.dart`：累计计数
+  - `dsp.dart`：滤波、重采样、PCA、频谱
+  - `rec_format.dart`：录制文件格式
+  - `synth.dart`：合成胸部运动信号
+- `lib/`：App（传感器采集、录制、界面）
+- `tool/analyze.dart`：对导出的录制重跑算法并与人工计数对比
+- `tool/synth.dart`：生成合成录制
+
+### 录制格式
+
+每次录制一对文件：
+
+- `rec_<时间>.csv`：`t_us,sensor,x,y,z`。`sensor` 为 `a`（加速度计，m/s²，含重力）或 `g`（陀螺仪，rad/s）；`t_us` 为相对开始的微秒数，取自传感器事件时间戳；约 50 Hz。
+- `rec_<时间>.json`：机型、采样周期、录制时使用的算法版本与参数、实时结果，以及标注（`label.manualCount` 为人工计数的呼吸次数，`posture`，`note`）。
+
+### 迭代算法
+
+```sh
+# 1. 从手机拉取全部录制
+adb pull /sdcard/Android/data/dev.xhze.breath/files/recordings ./data
+
+# 2. 修改 lib/algo/ 后（记得改 version），对全部录制重新评分
+dart run tool/analyze.dart data/recordings
+
+# 逐窗口输出；导出每窗口估计和滤波后信号（CSV，便于画图）
+dart run tool/analyze.dart data/recordings --verbose --dump out
+
+# 不改代码直接试参数
+dart run tool/analyze.dart data/recordings --quiet --set fLow=0.03 --window 90
+```
+
+`analyze` 输出各录制的平滑中位数（`track`）、平滑值最大跳变（`jump`）、静止段、累计次数（`total`）、未计时长（`uncnt`）和人工计数（`manual`），最后汇总与人工计数的误差。
+
+`data/` 与 `out/` 已在 `.gitignore` 中，录制数据不会被提交。
+
+## 已知限制
+
+- 只在一台手机（OnePlus PKG110，Android 15）和一个人身上测过
+- 熄屏后无法继续采集；整夜睡眠监测需要改成前台服务
+- 每分钟 3 次以下、且呼吸波形很不对称时，会误报为 2 倍
+- 移动期间无法计数，累计次数会少于实际
