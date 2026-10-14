@@ -1,10 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../settings.dart';
 import '../storage.dart';
+import 'review_page.dart';
+
+/// `20261013_204120` → `2026-10-13 20:41:20`.
+String prettyId(String id) => id.length == 15
+    ? '${id.substring(0, 4)}-${id.substring(4, 6)}-${id.substring(6, 8)} '
+        '${id.substring(9, 11)}:${id.substring(11, 13)}:${id.substring(13, 15)}'
+    : id;
 
 class RecordingsPage extends StatefulWidget {
-  const RecordingsPage({super.key});
+  final SettingsStore settings;
+
+  const RecordingsPage({super.key, required this.settings});
 
   @override
   State<RecordingsPage> createState() => _RecordingsPageState();
@@ -63,7 +73,7 @@ class _RecordingsPageState extends State<RecordingsPage> {
         final items = snap.data ?? [];
         return Scaffold(
           appBar: AppBar(
-            title: Text('录制记录（${items.length}）'),
+            title: Text('历史记录（${items.length}）'),
             actions: [
               IconButton(
                 icon: const Icon(Icons.share),
@@ -85,16 +95,26 @@ class _RecordingsPageState extends State<RecordingsPage> {
                   itemBuilder: (context, i) {
                     final e = items[i];
                     final m = e.data;
+                    final algo = m?.json['algo'] as Map?;
+                    final bpm = (algo?['tracker']?['medianTrackedBpm'] ??
+                        algo?['liveMedianBpm']) as num?;
+                    final total = algo?['counter']?['total'] as num?;
                     final parts = [
                       if (m != null) '${m.durationSec.toStringAsFixed(0)} s',
-                      '${(e.bytes / 1024).toStringAsFixed(0)} KB',
+                      if (bpm != null) '${bpm.toStringAsFixed(1)} 次/分',
+                      if (total != null) '累计 $total',
                       if (m?.manualCount != null) '手数 ${m!.manualCount}',
                       if (m != null && m.posture.isNotEmpty) m.posture,
-                      if (m?.json['algo']?['liveMedianBpm'] != null)
-                        '实时 ${(m!.json['algo']['liveMedianBpm'] as num).toStringAsFixed(1)}',
+                      '${(e.bytes / 1024).toStringAsFixed(0)} KB',
                     ];
                     return ListTile(
-                      title: Text(e.id),
+                      title: Text(prettyId(e.id)),
+                      onTap: () async {
+                        await Navigator.of(context).push(MaterialPageRoute(
+                            builder: (_) => ReviewPage(
+                                entry: e, settings: widget.settings)));
+                        _reload();
+                      },
                       subtitle: Text(parts.join(' · ')),
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,

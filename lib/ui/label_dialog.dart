@@ -7,9 +7,9 @@ const postures = ['仰卧-胸口', '仰卧-腹部', '侧卧', '坐姿', '其他'
 /// Asks for ground-truth labels after a recording. Returns null if skipped.
 Future<Map<String, dynamic>?> showLabelDialog(
     BuildContext context, RecordingMeta meta) {
-  final count = TextEditingController();
-  final note = TextEditingController();
-  var posture = postures.first;
+  final count = TextEditingController(text: meta.manualCount?.toString() ?? '');
+  final note = TextEditingController(text: meta.note);
+  var posture = postures.contains(meta.posture) ? meta.posture : postures.first;
   return showDialog<Map<String, dynamic>>(
     context: context,
     barrierDismissible: false,

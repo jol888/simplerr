@@ -13,7 +13,7 @@
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:breath/algo/breath_counter.dart';
+import 'package:breath/algo/pipeline.dart';
 import 'package:breath/algo/estimator.dart';
 import 'package:breath/algo/rec_format.dart';
 import 'package:breath/algo/tracker.dart';
@@ -95,22 +95,11 @@ Future<void> main(List<String> args) async {
     final name = f.uri.pathSegments.last.replaceAll('.csv', '');
     final dur = rec.durationUs;
 
-    final rows = <Estimate>[];
-    final tracked = <double?>[];
-    final tracker = RateTracker();
-    final counter = BreathCounter();
-    final stepUs = (step * 1e6).round();
-    for (var t = (cfg.minWindowSec * 1e6).round(); t <= dur; t += stepUs) {
-      final e = est.estimate(rec, t);
-      if (e == null) continue;
-      rows.add(e);
-      tracked.add(tracker.update(e));
-      counter.update(e);
-    }
-    if (rows.isNotEmpty) {
-      final last = est.estimate(rec, dur);
-      if (last != null) counter.finish(last);
-    }
+    final pipe =
+        Pipeline.replay(rec, cfg, const TrackerConfig(), stepSec: step);
+    final rows = pipe.estimates;
+    final tracked = [for (final p in pipe.history) p.tracked];
+    final counter = pipe.counter;
     final manual = meta?.manualCount;
     if (manual != null) errTotal.add((counter.total - manual).toDouble());
     final tv = tracked.whereType<double>().toList();

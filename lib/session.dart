@@ -6,51 +6,25 @@ import 'package:flutter/foundation.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
-import 'algo/breath_counter.dart';
 import 'algo/estimator.dart';
 import 'algo/imu.dart';
+import 'algo/pipeline.dart';
 import 'algo/rec_format.dart';
 import 'algo/tracker.dart';
+import 'settings.dart';
 import 'storage.dart';
 
-const samplingPeriod = Duration(milliseconds: 20);
-
-class BpmPoint {
-  final double tSec, bpm, bpmCount, quality, snrDb;
-  final bool valid;
-  final String channel;
-
-  /// Smoothed rate from [RateTracker], null while not enough valid estimates.
-  final double? tracked;
-
-  /// Breaths counted so far.
-  final int total;
-
-  BpmPoint(this.tSec, Estimate e, this.tracked, this.total)
-      : bpm = e.bpmSpectral,
-        bpmCount = e.bpmCount,
-        quality = e.quality,
-        snrDb = e.best.snrDb,
-        valid = e.valid,
-        channel = e.best.name;
-}
-
-/// Full estimates (with waveforms) kept for the cursor, newest last.
+/// Full estimates (with waveforms) kept for the cursor.
 const _keepEstimates = 600;
 
 /// One measurement session: streams sensors, writes the raw CSV, and runs the
-/// estimator once per second on a rolling buffer.
+/// pipeline once per second on a rolling buffer.
 class Session extends ChangeNotifier {
-  final estimator = RespirationEstimator();
-  final tracker = RateTracker();
-  final counter = BreathCounter();
+  AppSettings settings;
+  late Pipeline pipeline = _newPipeline();
 
   bool running = false;
   String? id;
-  Estimate? latest;
-  double? tracked;
-  final history = <BpmPoint>[];
-  final _estimates = <Estimate>[];
   int accCount = 0, gyroCount = 0;
   double elapsedSec = 0;
 
@@ -62,6 +36,13 @@ class Session extends ChangeNotifier {
   int _t0Us = 0;
   DateTime? _startedAt;
 
+  Session(this.settings);
+
+  Pipeline _newPipeline() =>
+      Pipeline(settings.estimatorConfig, settings.trackerConfig,
+          keepEstimates: _keepEstimates);
+
+  EstimatorConfig get cfg => pipeline.estimator.cfg;
   double get accRateHz => elapsedSec > 0 ? accCount / elapsedSec : 0;
   double get gyroRateHz => elapsedSec > 0 ? gyroCount / elapsedSec : 0;
 
@@ -74,19 +55,15 @@ class Session extends ChangeNotifier {
     _writer = CsvWriter(await Storage.csvFile(id!));
     _buf.acc.clear();
     _buf.gyro.clear();
-    history.clear();
-    _estimates.clear();
-    tracker.reset();
-    counter.reset();
-    latest = null;
-    tracked = null;
+    pipeline = _newPipeline();
     accCount = gyroCount = 0;
     elapsedSec = 0;
     running = true;
 
-    _accSub = accelerometerEventStream(samplingPeriod: samplingPeriod)
+    final period = Duration(milliseconds: settings.samplingMs);
+    _accSub = accelerometerEventStream(samplingPeriod: period)
         .listen((e) => _add('a', _buf.acc, e.timestamp, e.x, e.y, e.z));
-    _gyroSub = gyroscopeEventStream(samplingPeriod: samplingPeriod).listen(
+    _gyroSub = gyroscopeEventStream(samplingPeriod: period).listen(
       (e) => _add('g', _buf.gyro, e.timestamp, e.x, e.y, e.z),
       onError: (_) {},
     );
@@ -113,34 +90,14 @@ class Session extends ChangeNotifier {
     elapsedSec = (DateTime.now().microsecondsSinceEpoch - _t0Us) / 1e6;
     if (_buf.acc.isNotEmpty) {
       final tEnd = _buf.acc.last.tUs;
-      final keepFrom = tEnd - ((estimator.cfg.windowSec + 5) * 1e6).round();
+      final keepFrom = tEnd - ((cfg.windowSec + 5) * 1e6).round();
       for (final l in [_buf.acc, _buf.gyro]) {
         final i = lowerBound(l, keepFrom);
         if (i > 0) l.removeRange(0, i);
       }
-      final est = estimator.estimate(_buf, tEnd);
-      if (est != null) {
-        latest = est;
-        tracked = tracker.update(est);
-        counter.update(est);
-        history.add(BpmPoint(tEnd / 1e6, est, tracked, counter.total));
-        _estimates.add(est);
-        if (_estimates.length > _keepEstimates) _estimates.removeAt(0);
-      }
+      pipeline.step(_buf, tEnd);
     }
     notifyListeners();
-  }
-
-  /// Estimate whose window ends closest to [tSec], if still buffered.
-  Estimate? estimateAt(double tSec) {
-    Estimate? best;
-    for (final e in _estimates) {
-      if (best == null ||
-          (e.tEndUs / 1e6 - tSec).abs() < (best.tEndUs / 1e6 - tSec).abs()) {
-        best = e;
-      }
-    }
-    return best != null && (best.tEndUs / 1e6 - tSec).abs() < 1.5 ? best : null;
   }
 
   /// Stops sensors and returns the metadata skeleton (caller adds labels).
@@ -150,36 +107,31 @@ class Session extends ChangeNotifier {
     await _accSub?.cancel();
     await _gyroSub?.cancel();
     _timer?.cancel();
-    if (_buf.acc.isNotEmpty) {
-      final last = estimator.estimate(_buf, _buf.acc.last.tUs);
-      if (last != null) counter.finish(last);
-    }
+    if (_buf.acc.isNotEmpty) pipeline.finish(_buf, _buf.acc.last.tUs);
     await _writer?.close();
     _writer = null;
     await WakelockPlus.disable();
 
+    final history = pipeline.history;
     final valid = history.where((p) => p.valid).map((p) => p.bpm).toList()
       ..sort();
-    final trackedVals =
-        history.map((p) => p.tracked).whereType<double>().toList()..sort();
     final meta = RecordingMeta({
       'format': formatVersion,
       'id': id,
       'startedAt': _startedAt!.toIso8601String(),
       'durationSec': elapsedSec,
-      'samplingPeriodMs': samplingPeriod.inMilliseconds,
+      'samplingPeriodMs': settings.samplingMs,
       'samples': {'acc': accCount, 'gyro': gyroCount},
       'device': await _deviceInfo(),
       'algo': {
         'version': RespirationEstimator.version,
-        'config': estimator.cfg.toJson(),
+        'config': cfg.toJson(),
         'liveMedianBpm': valid.isEmpty ? null : valid[valid.length ~/ 2],
-        'counter': counter.toJson(),
+        'counter': pipeline.counter.toJson(),
         'tracker': {
           'version': RateTracker.version,
-          'config': tracker.cfg.toJson(),
-          'medianTrackedBpm':
-              trackedVals.isEmpty ? null : trackedVals[trackedVals.length ~/ 2],
+          'config': pipeline.tracker.cfg.toJson(),
+          'medianTrackedBpm': pipeline.medianTracked,
         },
       },
       'label': <String, dynamic>{},

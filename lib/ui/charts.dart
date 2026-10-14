@@ -3,7 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../algo/estimator.dart';
-import '../session.dart';
+import '../algo/pipeline.dart';
 
 /// Filtered signal of the selected channel, with detected breath onsets.
 class WaveformPainter extends CustomPainter {

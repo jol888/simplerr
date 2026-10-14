@@ -9,6 +9,18 @@ class TrackerConfig {
 
   const TrackerConfig({this.spanSec = 15, this.minValid = 5});
 
+  /// Short spans need fewer estimates before reporting.
+  factory TrackerConfig.span(double spanSec) => TrackerConfig(
+      spanSec: spanSec, minValid: (spanSec / 3).round().clamp(1, 5));
+
+  factory TrackerConfig.fromJson(Map<String, dynamic> j) {
+    const d = TrackerConfig();
+    return TrackerConfig(
+      spanSec: (j['spanSec'] as num?)?.toDouble() ?? d.spanSec,
+      minValid: (j['minValid'] as num?)?.toInt() ?? d.minValid,
+    );
+  }
+
   Map<String, Object> toJson() => {'spanSec': spanSec, 'minValid': minValid};
 }
 
